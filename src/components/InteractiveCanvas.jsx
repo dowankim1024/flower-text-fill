@@ -2,7 +2,10 @@ import React, { useEffect, useRef, useState } from "react";
 
 export default function InteractiveCanvas() {
   const canvasRef = useRef(null);
-  const [text, setText] = useState([]); // Changed to array to accumulate texts
+  const [text, setText] = useState(() => {
+    const savedText = localStorage.getItem('flowerText');
+    return savedText ? JSON.parse(savedText) : [];
+  }); // Changed to array to accumulate texts
   const recognitionRef = useRef(null);
   const [status, setStatus] = useState("idle"); // idle | listening | done | rendering
 
@@ -83,6 +86,11 @@ export default function InteractiveCanvas() {
       return () => clearTimeout(timer);
     }
   }, [status]);
+
+  // Effect to save text to localStorage whenever it changes
+  useEffect(() => {
+    localStorage.setItem('flowerText', JSON.stringify(text));
+  }, [text]);
 
   // Effect for rendering the canvas
   useEffect(() => {
