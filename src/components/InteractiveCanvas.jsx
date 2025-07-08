@@ -121,8 +121,18 @@ export default function InteractiveCanvas() {
           // img.width and img.height will reflect the intrinsic dimensions of the SVG (310.53, 409.35)
           const scaleX = flowerWidth / img.width;
           const scaleY = flowerHeight / img.height;
-          const matrix = new DOMMatrix().scale(scaleX, scaleY);
+          // Slightly increase scale to expand the path for text placement
+          const expandedScaleX = scaleX * 1.05; // Adjust this value as needed
+          const expandedScaleY = scaleY * 1.05; // Adjust this value as needed
+          // Add a small negative translation to shift the expanded path to the left
+          const offsetX = 5; // Example: 5 pixels to the left, adjust as needed
+          const matrix = new DOMMatrix().scale(expandedScaleX, expandedScaleY).translate(-offsetX, 0);
           path.addPath(new Path2D(d), matrix);
+
+          // Create an original path for clipping
+          const originalMatrix = new DOMMatrix().scale(scaleX, scaleY);
+          const originalPath = new Path2D();
+          originalPath.addPath(new Path2D(d), originalMatrix);
 
           canvas.width = flowerWidth;
           canvas.height = flowerHeight;
@@ -134,6 +144,11 @@ export default function InteractiveCanvas() {
           if (text.length > 0) {
             ctx.font = "15px Eulyoo1945";
             ctx.fillStyle = "#1a1a1a";
+
+            // Save the context state before applying clip
+            ctx.save();
+            // Apply the original flower path as a clipping mask
+            ctx.clip(originalPath);
 
             const fullText = text.join(" "); // Combine all accumulated texts
             const characters = fullText.split("");
@@ -152,6 +167,7 @@ export default function InteractiveCanvas() {
 
               // Find horizontal ranges within the path for the current y
               while (x < canvas.width) {
+                // Use the expanded path for point-in-path check
                 const inside = ctx.isPointInPath(path, x, y);
                 if (inside && !inPath) {
                   startX = x;
@@ -179,6 +195,8 @@ export default function InteractiveCanvas() {
               }
               y -= lineHeight; // Move up for the next line
             }
+            // Restore the context state to remove the clipping path
+            ctx.restore();
           }
 
           // After rendering text, wait for a moment and then return to idle.
