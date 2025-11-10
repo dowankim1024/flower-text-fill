@@ -1,16 +1,225 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+
+const FLOWER_SVG_URL = "/flower.svg";
+const FLOWER_TARGET_WIDTH = 730;
+const FLOWER_EXPANSION_SCALE = 1.05;
+const FLOWER_OFFSET_X = 5;
+const FONT_SIZE_PX = 15;
+const LINE_HEIGHT_PX = 21;
+const RESULT_DISPLAY_DELAY_MS = 1500;
+const CANVAS_FADE_DURATION_MS = 800;
+const RENDER_IDLE_DELAY_MS = 2000;
+const NEW_TEXT_FADE_DURATION_MS = 3000;
+
+let flowerResourcesPromise = null;
+
+async function loadFlowerResources() {
+  if (!flowerResourcesPromise) {
+    flowerResourcesPromise = (async () => {
+      const response = await fetch(FLOWER_SVG_URL);
+      const svgText = await response.text();
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgText, "image/svg+xml");
+      const svgElement = doc.querySelector("svg");
+      const pathData = doc.querySelector("path")?.getAttribute("d");
+      if (!pathData) {
+        throw new Error("No path found in SVG");
+      }
+
+      let baseWidth = 0;
+      let baseHeight = 0;
+      const viewBox = svgElement?.getAttribute("viewBox");
+      if (viewBox) {
+        const [, , width, height] = viewBox.trim().split(/\s+/).map(parseFloat);
+        baseWidth = width;
+        baseHeight = height;
+      }
+
+      const image = new Image();
+      image.src = FLOWER_SVG_URL;
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error("Failed to load flower image"));
+      });
+
+      if (!baseWidth || !baseHeight) {
+        baseWidth = image.naturalWidth || image.width;
+        baseHeight = image.naturalHeight || image.height;
+      }
+
+      const flowerWidth = FLOWER_TARGET_WIDTH;
+      const flowerHeight = (baseHeight / baseWidth) * flowerWidth;
+
+      const basePath = new Path2D(pathData);
+      const scaleX = flowerWidth / baseWidth;
+      const scaleY = flowerHeight / baseHeight;
+
+      const expandedMatrix = new DOMMatrix()
+        .scale(scaleX * FLOWER_EXPANSION_SCALE, scaleY * FLOWER_EXPANSION_SCALE)
+        .translate(-FLOWER_OFFSET_X, 0);
+      const expandedPath = new Path2D();
+      expandedPath.addPath(basePath, expandedMatrix);
+
+      const originalMatrix = new DOMMatrix().scale(scaleX, scaleY);
+      const originalPath = new Path2D();
+      originalPath.addPath(basePath, originalMatrix);
+
+      return {
+        image,
+        flowerWidth,
+        flowerHeight,
+        expandedPath,
+        originalPath,
+      };
+    })();
+  }
+
+  return flowerResourcesPromise;
+}
+
+async function willTextOverflow(textItems) {
+  if (textItems.length === 0) {
+    return false;
+  }
+
+  const { expandedPath, flowerWidth, flowerHeight } = await loadFlowerResources();
+  const canvas = document.createElement("canvas");
+  canvas.width = flowerWidth;
+  canvas.height = flowerHeight;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return false;
+  }
+
+  ctx.font = `${FONT_SIZE_PX}px Eulyoo1945`;
+  const fullText = textItems.join(" ");
+  const characters = fullText.split("");
+  let charIndex = 0;
+
+  for (let y = flowerHeight - LINE_HEIGHT_PX; y >= 0 && charIndex < characters.length; y -= LINE_HEIGHT_PX) {
+    let x = 0;
+    let inPath = false;
+    let startX = 0;
+    const ranges = [];
+
+    while (x < flowerWidth) {
+      const inside = ctx.isPointInPath(expandedPath, x, y);
+      if (inside && !inPath) {
+        startX = x;
+        inPath = true;
+      } else if (!inside && inPath) {
+        ranges.push([startX, x]);
+        inPath = false;
+      }
+      x += 1;
+    }
+    if (inPath) {
+      ranges.push([startX, flowerWidth]);
+    }
+
+    for (const [xStart, xEnd] of ranges) {
+      let currX = xStart;
+      while (charIndex < characters.length && currX < xEnd) {
+        const width = ctx.measureText(characters[charIndex]).width;
+        if (currX + width > xEnd) {
+          break;
+        }
+        currX += width;
+        charIndex += 1;
+      }
+      if (charIndex >= characters.length) {
+        break;
+      }
+    }
+  }
+
+  return charIndex < characters.length;
+}
 
 export default function InteractiveCanvas() {
   const canvasRef = useRef(null);
   const [text, setText] = useState(() => {
-    const savedText = localStorage.getItem('flowerText');
+    const savedText = localStorage.getItem("flowerText");
     return savedText ? JSON.parse(savedText) : [];
-  }); // Changed to array to accumulate texts
-  const recognitionRef = useRef(null);
-  const [status, setStatus] = useState("idle"); // idle | listening | done | rendering
+  });
+  const [status, setStatus] = useState("idle"); // idle | listening | done | rendering | clearing
+  const [lastTranscript, setLastTranscript] = useState("");
+  const [fadePhase, setFadePhase] = useState("idle"); // idle | out | in
 
-  // This function is now only for setting up and starting recognition
-  const startListening = () => {
+  const recognitionRef = useRef(null);
+  const resultTimerRef = useRef(null);
+  const textRef = useRef(text);
+  const pendingTranscriptRef = useRef(null);
+  const previousCharCountRef = useRef(0);
+  const animationFrameRef = useRef(null);
+  const newTextAnimationRef = useRef({
+    active: false,
+    startTime: null,
+    duration: NEW_TEXT_FADE_DURATION_MS,
+  });
+
+  useEffect(() => {
+    textRef.current = text;
+  }, [text]);
+
+  useEffect(() => {
+    if (text.length > 0) {
+      localStorage.setItem("flowerText", JSON.stringify(text));
+    } else {
+      localStorage.removeItem("flowerText");
+    }
+  }, [text]);
+
+  const clearResultTimer = useCallback(() => {
+    if (resultTimerRef.current) {
+      clearTimeout(resultTimerRef.current);
+      resultTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => clearResultTimer(), [clearResultTimer]);
+
+  const handleTranscript = useCallback(
+    async (transcript) => {
+      clearResultTimer();
+      if (!transcript) {
+        setStatus("idle");
+        return;
+      }
+
+      try {
+        const candidate = [...textRef.current, transcript];
+        const overflow = await willTextOverflow(candidate);
+
+        if (overflow) {
+          pendingTranscriptRef.current = transcript;
+          setFadePhase("out");
+          setStatus("clearing");
+        } else {
+          pendingTranscriptRef.current = null;
+          const previousFullText = textRef.current.join(" ");
+          previousCharCountRef.current = previousFullText.length;
+          newTextAnimationRef.current = {
+            active: true,
+            startTime: null,
+            duration: NEW_TEXT_FADE_DURATION_MS,
+          };
+          setText(() => {
+            textRef.current = candidate;
+            return candidate;
+          });
+          setFadePhase("idle");
+          setStatus("rendering");
+        }
+      } catch (error) {
+        console.error("Failed to process transcript", error);
+        setStatus("idle");
+      }
+    },
+    [clearResultTimer],
+  );
+
+  const startListening = useCallback(() => {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -25,209 +234,224 @@ export default function InteractiveCanvas() {
       recognition.interimResults = false;
       recognition.maxAlternatives = 1;
 
-      // When the browser starts listening
       recognition.onspeechstart = () => {
         setStatus("listening");
       };
 
-      // When a result is received
       recognition.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        setText((prevText) => [...prevText, transcript]); // Accumulate new text
+        const transcript = event.results[0][0].transcript.trim();
+        if (!transcript) {
+          return;
+        }
+        setLastTranscript(transcript);
         setStatus("done");
-
-        setTimeout(() => {
-          setStatus("rendering");
-        }, 1500);
+        clearResultTimer();
+        resultTimerRef.current = setTimeout(() => {
+          handleTranscript(transcript);
+        }, RESULT_DISPLAY_DELAY_MS);
       };
 
-      // On error
       recognition.onerror = (event) => {
-        if (event.error === "no-speech" || event.error === "aborted") {
-          console.log(`Speech recognition ended: ${event.error}`);
-        } else {
+        if (event.error !== "no-speech" && event.error !== "aborted") {
           console.error("Speech recognition error", event.error);
         }
-        // onend will be called which handles restarting.
       };
 
-      // When recognition service ends
       recognition.onend = () => {
-        // Automatically restart by transitioning to idle,
-        // unless we are in the process of rendering the result.
-        setStatus((currentStatus) => {
-          if (currentStatus === "listening") {
-            return "idle";
-          }
-          return currentStatus;
-        });
+        setStatus((current) => (current === "listening" ? "idle" : current));
       };
 
       recognitionRef.current = recognition;
     }
 
     try {
-      // Start listening
       recognitionRef.current.start();
     } catch (error) {
       if (error.name !== "InvalidStateError") {
         console.error("Speech recognition could not be started", error);
-        // Try to recover by going to idle
         setStatus("idle");
       }
     }
-  };
+  }, [clearResultTimer, handleTranscript]);
 
-  // Main component lifecycle effect for voice recognition
   useEffect(() => {
-    // Start listening when the component is in 'idle' state
     if (status === "idle") {
       const timer = setTimeout(startListening, 100);
       return () => clearTimeout(timer);
     }
-  }, [status]);
+  }, [startListening, status]);
 
-  // Effect to save text to localStorage whenever it changes
   useEffect(() => {
-    localStorage.setItem('flowerText', JSON.stringify(text));
-  }, [text]);
-
-  // Effect for rendering the canvas
-  useEffect(() => {
-    // Redraw the canvas only when idle (to clear previous text) or when rendering new text.
-    // Also redraw when text changes to update the accumulated text on canvas.
     if (status !== "idle" && status !== "rendering") {
       return;
     }
 
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const svgUrl = "/flower.svg";
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
 
-    fetch(svgUrl)
-      .then((res) => res.text())
-      .then((svgText) => {
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(svgText, "image/svg+xml");
-        const d = doc.querySelector("path")?.getAttribute("d");
-        if (!d) {
-          console.error("No path found in SVG");
-          setStatus('idle'); // Go back to idle if svg fails
+    let cancelled = false;
+    let idleTimer = null;
+
+    const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+
+    const drawFrame = (resources) => {
+      if (cancelled) return;
+
+      const { image, expandedPath, originalPath, flowerWidth, flowerHeight } = resources;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      canvas.width = flowerWidth;
+      canvas.height = flowerHeight;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      ctx.globalAlpha = 0.08;
+      ctx.drawImage(image, 0, 0, flowerWidth, flowerHeight);
+      ctx.restore();
+
+      if (text.length > 0) {
+        ctx.save();
+        ctx.clip(originalPath);
+        ctx.font = `${FONT_SIZE_PX}px Eulyoo1945`;
+        ctx.fillStyle = "#1a1a1a";
+
+        const fullText = text.join(" ");
+        const characters = fullText.split("");
+        const previousCount = Math.min(previousCharCountRef.current, characters.length);
+
+        const animationState = newTextAnimationRef.current;
+        let progress = 1;
+        let alphaForNewChars = 1;
+
+        if (animationState.active) {
+          if (animationState.startTime == null) {
+            animationState.startTime = performance.now();
+          }
+          const now = performance.now();
+          progress = Math.min(1, (now - animationState.startTime) / animationState.duration);
+          alphaForNewChars = easeOut(progress);
+        }
+
+        let charIndex = 0;
+
+        for (let y = canvas.height - LINE_HEIGHT_PX; y >= 0 && charIndex < characters.length; y -= LINE_HEIGHT_PX) {
+          let x = 0;
+          let inPath = false;
+          let startX = 0;
+          const ranges = [];
+
+          while (x < canvas.width) {
+            const inside = ctx.isPointInPath(expandedPath, x, y);
+            if (inside && !inPath) {
+              startX = x;
+              inPath = true;
+            } else if (!inside && inPath) {
+              ranges.push([startX, x]);
+              inPath = false;
+            }
+            x += 1;
+          }
+          if (inPath) {
+            ranges.push([startX, canvas.width]);
+          }
+
+          for (const [xStart, xEnd] of ranges) {
+            let currX = xStart;
+            while (charIndex < characters.length && currX < xEnd) {
+              const ch = characters[charIndex];
+              const width = ctx.measureText(ch).width;
+              if (currX + width > xEnd) {
+                break;
+              }
+              const isNewChar = charIndex >= previousCount;
+              ctx.globalAlpha = isNewChar && animationState.active ? alphaForNewChars : 1;
+              ctx.fillText(ch, currX, y);
+              currX += width;
+              charIndex += 1;
+            }
+            if (charIndex >= characters.length) {
+              break;
+            }
+          }
+        }
+
+        ctx.restore();
+        ctx.globalAlpha = 1;
+
+        if (animationState.active && progress < 1) {
+          animationFrameRef.current = requestAnimationFrame(() => drawFrame(resources));
           return;
         }
 
-        const img = new Image();
-        img.src = svgUrl;
-        img.onload = () => {
-          const flowerWidth = 730; // 67.6vmin (730/1080*100)
-          const flowerHeight = (img.height / img.width) * flowerWidth;
+        if (animationState.active && progress >= 1) {
+          animationState.active = false;
+          animationState.startTime = null;
+          previousCharCountRef.current = characters.length;
+        }
+      }
 
-          const path = new Path2D();
-          // Calculate scaling factors based on the SVG's intrinsic size (from viewBox)
-          // and the desired canvas size.
-          // img.width and img.height will reflect the intrinsic dimensions of the SVG (310.53, 409.35)
-          const scaleX = flowerWidth / img.width;
-          const scaleY = flowerHeight / img.height;
-          // Slightly increase scale to expand the path for text placement
-          const expandedScaleX = scaleX * 1.05; // Adjust this value as needed
-          const expandedScaleY = scaleY * 1.05; // Adjust this value as needed
-          // Add a small negative translation to shift the expanded path to the left
-          const offsetX = 5; // 0.46vmin (5/1080*100)
-          const matrix = new DOMMatrix().scale(expandedScaleX, expandedScaleY).translate(-offsetX, 0);
-          path.addPath(new Path2D(d), matrix);
+      if (status === "rendering" && !animationFrameRef.current) {
+        idleTimer = setTimeout(() => {
+          setStatus("idle");
+        }, RENDER_IDLE_DELAY_MS);
+      }
+    };
 
-          // Create an original path for clipping
-          const originalMatrix = new DOMMatrix().scale(scaleX, scaleY);
-          const originalPath = new Path2D();
-          originalPath.addPath(new Path2D(d), originalMatrix);
-
-          canvas.width = flowerWidth;
-          canvas.height = flowerHeight;
-
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          
-          // SVG 이미지를 반투명하게 그리기
-          ctx.save();
-          ctx.globalAlpha = 0.08; // 불투명도 조절 (0.0 = 완전 투명, 1.0 = 완전 불투명)
-          ctx.drawImage(img, 0, 0, flowerWidth, flowerHeight);
-          ctx.restore();
-
-          // Draw all accumulated text
-          if (text.length > 0) {
-            ctx.font = "1.39vmin Eulyoo1945"; // 15px -> 1.39vmin
-            ctx.fillStyle = "#1a1a1a";
-
-            // Save the context state before applying clip
-            ctx.save();
-            // Apply the original flower path as a clipping mask
-            ctx.clip(originalPath);
-
-            const fullText = text.join(" "); // Combine all accumulated texts
-            const characters = fullText.split("");
-            const lineHeight = 21; // 1.94vmin (21/1080*100) - 140% of 15px
-            let charIndex = 0;
-
-            // Start drawing from the bottom of the canvas
-            let y = canvas.height - lineHeight;
-
-            // Loop downwards from the bottom of the canvas
-            while (y >= 0 && charIndex < characters.length) {
-              let x = 0;
-              let inPath = false;
-              let startX = 0;
-              const ranges = [];
-
-              // Find horizontal ranges within the path for the current y
-              while (x < canvas.width) {
-                // Use the expanded path for point-in-path check
-                const inside = ctx.isPointInPath(path, x, y);
-                if (inside && !inPath) {
-                  startX = x;
-                  inPath = true;
-                } else if (!inside && inPath) {
-                  ranges.push([startX, x]);
-                  inPath = false;
-                }
-                x++;
-              }
-              if (inPath) ranges.push([startX, canvas.width]);
-
-              // Fill characters into the found ranges
-              for (const [xStart, xEnd] of ranges) {
-                let currX = xStart;
-                while (charIndex < characters.length && currX < xEnd) {
-                  const ch = characters[charIndex];
-                  const width = ctx.measureText(ch).width;
-                  if (currX + width > xEnd) break;
-                  ctx.fillText(ch, currX, y);
-                  currX += width;
-                  charIndex++;
-                }
-                if (charIndex >= characters.length) break;
-              }
-              y -= lineHeight; // Move up for the next line
-            }
-            // Restore the context state to remove the clipping path
-            ctx.restore();
-          }
-
-          // After rendering text, wait for a moment and then return to idle.
-          // This allows the user to see the result before it resets.
-          if (status === "rendering") {
-            setTimeout(() => {
-              setStatus("idle"); // This will trigger a re-render of the canvas with accumulated text.
-            }, 2000);
-          }
-        };
-        img.onerror = () => {
-            console.error("Failed to load flower image.");
-            setStatus('idle'); // Go back to idle if image fails
+    loadFlowerResources()
+      .then((resources) => {
+        if (!cancelled) {
+          drawFrame(resources);
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to render flower canvas", error);
+        if (status !== "idle") {
+          setStatus("idle");
         }
       });
-  }, [status, text]); // Dependency on text to redraw when accumulated text changes
 
-  const isBlurred = status === "listening" || status === "done";
+    return () => {
+      cancelled = true;
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+    };
+  }, [status, text]);
+
+  const handleCanvasTransitionEnd = useCallback(() => {
+    if (fadePhase === "out") {
+      const pending = pendingTranscriptRef.current;
+      pendingTranscriptRef.current = null;
+      previousCharCountRef.current = 0;
+      newTextAnimationRef.current = {
+        active: true,
+        startTime: null,
+        duration: NEW_TEXT_FADE_DURATION_MS,
+      };
+      const nextText = pending ? [pending] : [];
+      setText(() => {
+        textRef.current = nextText;
+        return nextText;
+      });
+      setFadePhase("in");
+      setStatus("rendering");
+    } else if (fadePhase === "in") {
+      setFadePhase("idle");
+    }
+  }, [fadePhase]);
+
+  const showOverlay = status === "listening" || status === "done";
+  const canvasOpacity = fadePhase === "out" ? 0 : 1;
 
   return (
     <div
@@ -244,16 +468,24 @@ export default function InteractiveCanvas() {
       <div
         style={{
           transition: "filter 0.5s ease-in-out",
-          filter: isBlurred ? "blur(0.74vmin)" : "none", // 8px -> 0.74vmin
+          filter: showOverlay ? "blur(0.74vmin)" : "none",
         }}
       >
         <canvas
           ref={canvasRef}
-          style={{ width: "67.6vmin", height: "auto", display: "block" }} // 730px -> 67.6vmin
+          onTransitionEnd={handleCanvasTransitionEnd}
+          style={{
+            width: "67.6vmin",
+            height: "auto",
+            display: "block",
+            opacity: canvasOpacity,
+            transition: `opacity ${CANVAS_FADE_DURATION_MS / 1000}s ease`,
+          }}
         />
+        {/* 730px -> 67.6vmin */}
       </div>
 
-      {isBlurred && (
+      {showOverlay && (
         <div
           style={{
             position: "absolute",
@@ -263,35 +495,33 @@ export default function InteractiveCanvas() {
             textAlign: "center",
           }}
         >
-          {status === "listening" && (
+          {status === "listening" ? (
             <>
               <img
                 src="/mic.png"
                 alt="mic"
-                style={{ width: "4.44vmin", marginBottom: "1.85vmin" }} // 48px->4.44vmin, 20px->1.85vmin
+                style={{ width: "4.44vmin", marginBottom: "1.85vmin" }}
               />
-              <p style={{ fontSize: "3.33vmin", color: "#333", fontFamily: "Eulyoo1945" }}> // 36px -> 3.33vmin
+              <p style={{ fontSize: "3.33vmin", color: "#333", fontFamily: "Eulyoo1945" }}>
                 방명록을 남겨주세요.
               </p>
             </>
-          )}
-
-          {status === "done" && (
+          ) : (
             <>
               <p
                 style={{
-                  fontSize: "4.44vmin", // 48px -> 4.44vmin
-                  marginBottom: "2.78vmin", // 30px -> 2.78vmin
-                  maxWidth: "55.56vmin", // 600px -> 55.56vmin
+                  fontSize: "4.44vmin",
+                  marginBottom: "2.78vmin",
+                  maxWidth: "55.56vmin",
                   lineHeight: 1.5,
                   color: "#333",
-                  padding: "0 1.85vmin", // 20px -> 1.85vmin
+                  padding: "0 1.85vmin",
                   fontFamily: "Eulyoo1945",
                 }}
               >
-                {text.length > 0 ? text[text.length - 1].trim() : ""} {/* Display last recognized text */}
+                {lastTranscript}
               </p>
-              <img src="/mic.png" alt="mic" style={{ width: "3.33vmin" }} /> // 36px -> 3.33vmin
+              <img src="/mic.png" alt="mic" style={{ width: "3.33vmin" }} />
             </>
           )}
         </div>
