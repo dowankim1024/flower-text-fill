@@ -9,8 +9,10 @@ const LINE_HEIGHT_PX = 21;
 const RESULT_DISPLAY_DELAY_MS = 1500;
 const CANVAS_FADE_DURATION_MS = 800;
 const RENDER_IDLE_DELAY_MS = 2000;
-const NEW_TEXT_FADE_DURATION_MS = 3000;
-const SILENCE_TIMEOUT_MS = 1500; // 1.5초간 침묵 시 인식 종료
+const NEW_TEXT_FADE_DURATION_MS = 2500;
+const SILENCE_TIMEOUT_MS = 1000; // 1초간 침묵 시 인식 종료
+const VOLUME_THRESHOLD = 0.02; // 0.0 ~ 1.0 범위, 이 값 이상의 볼륨만 인식
+const VOLUME_CHECK_INTERVAL_MS = 100; // 볼륨 체크 간격
 
 let flowerResourcesPromise = null;
 
@@ -160,6 +162,10 @@ export default function InteractiveCanvas() {
   });
   const silenceTimerRef = useRef(null);
   const collectedTranscriptsRef = useRef([]);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const micStreamRef = useRef(null);
+  const volumeCheckIntervalRef = useRef(null);
 
   useEffect(() => {
     textRef.current = text;
@@ -186,9 +192,61 @@ export default function InteractiveCanvas() {
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
       }
+      if (volumeCheckIntervalRef.current) {
+        clearInterval(volumeCheckIntervalRef.current);
+      }
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach((track) => track.stop());
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+      }
     },
     [clearResultTimer],
   );
+
+  const setupAudioMonitoring = useCallback(async () => {
+    if (audioContextRef.current) {
+      return; // Already set up
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      const audioContext = new AudioContext();
+      audioContextRef.current = audioContext;
+
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.8;
+      analyserRef.current = analyser;
+
+      const microphone = audioContext.createMediaStreamSource(stream);
+      microphone.connect(analyser);
+
+      console.log("[DEBUG] Audio monitoring setup complete");
+    } catch (error) {
+      console.error("Failed to setup audio monitoring:", error);
+    }
+  }, []);
+
+  const getCurrentVolume = useCallback(() => {
+    if (!analyserRef.current) {
+      return 0;
+    }
+
+    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+    analyserRef.current.getByteFrequencyData(dataArray);
+
+    let sum = 0;
+    for (let i = 0; i < dataArray.length; i++) {
+      sum += dataArray[i];
+    }
+    const average = sum / dataArray.length;
+    return average / 255; // 0.0 ~ 1.0 범위로 정규화
+  }, []);
 
   const handleTranscript = useCallback(
     async (transcript) => {
@@ -352,14 +410,39 @@ export default function InteractiveCanvas() {
     }
   }, [resetSilenceTimer, finalizeRecognition]);
 
+  // Setup audio monitoring on mount
+  useEffect(() => {
+    setupAudioMonitoring();
+  }, [setupAudioMonitoring]);
+
+  // Monitor volume and start listening when threshold is exceeded
   useEffect(() => {
     console.log("[DEBUG] Status changed to:", status);
     if (status === "idle") {
-      console.log("[DEBUG] Status is idle, will start listening in 100ms");
-      const timer = setTimeout(startListening, 100);
-      return () => clearTimeout(timer);
+      console.log("[DEBUG] Status is idle, monitoring volume for activation");
+      
+      if (volumeCheckIntervalRef.current) {
+        clearInterval(volumeCheckIntervalRef.current);
+      }
+
+      volumeCheckIntervalRef.current = setInterval(() => {
+        const volume = getCurrentVolume();
+        if (volume >= VOLUME_THRESHOLD) {
+          console.log("[DEBUG] Volume threshold exceeded:", volume.toFixed(3), "starting recognition");
+          clearInterval(volumeCheckIntervalRef.current);
+          volumeCheckIntervalRef.current = null;
+          startListening();
+        }
+      }, VOLUME_CHECK_INTERVAL_MS);
+
+      return () => {
+        if (volumeCheckIntervalRef.current) {
+          clearInterval(volumeCheckIntervalRef.current);
+          volumeCheckIntervalRef.current = null;
+        }
+      };
     }
-  }, [startListening, status]);
+  }, [getCurrentVolume, startListening, status]);
 
   useEffect(() => {
     if (status !== "idle" && status !== "rendering") {
