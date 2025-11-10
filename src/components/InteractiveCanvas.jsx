@@ -235,14 +235,17 @@ export default function InteractiveCanvas() {
       recognition.maxAlternatives = 1;
 
       recognition.onspeechstart = () => {
+        console.log("[DEBUG] Speech detected");
         setStatus("listening");
       };
 
       recognition.onresult = (event) => {
+        console.log("[DEBUG] Recognition result received");
         const transcript = event.results[0][0].transcript.trim();
         if (!transcript) {
           return;
         }
+        console.log("[DEBUG] Transcript:", transcript);
         setLastTranscript(transcript);
         setStatus("done");
         clearResultTimer();
@@ -252,13 +255,18 @@ export default function InteractiveCanvas() {
       };
 
       recognition.onerror = (event) => {
+        console.log("[DEBUG] Recognition error:", event.error);
         if (event.error !== "no-speech" && event.error !== "aborted") {
           console.error("Speech recognition error", event.error);
         }
       };
 
       recognition.onend = () => {
-        setStatus((current) => (current === "listening" ? "idle" : current));
+        console.log("[DEBUG] Recognition ended, current status will be checked");
+        setStatus((current) => {
+          console.log("[DEBUG] Current status on end:", current);
+          return current === "listening" ? "idle" : current;
+        });
       };
 
       recognitionRef.current = recognition;
@@ -275,7 +283,9 @@ export default function InteractiveCanvas() {
   }, [clearResultTimer, handleTranscript]);
 
   useEffect(() => {
+    console.log("[DEBUG] Status changed to:", status);
     if (status === "idle") {
+      console.log("[DEBUG] Status is idle, will start listening in 100ms");
       const timer = setTimeout(startListening, 100);
       return () => clearTimeout(timer);
     }
@@ -390,16 +400,31 @@ export default function InteractiveCanvas() {
         }
 
         if (animationState.active && progress >= 1) {
+          console.log("[DEBUG] Animation completed");
           animationState.active = false;
           animationState.startTime = null;
           previousCharCountRef.current = characters.length;
+          // Clear animation frame ref since animation is done
+          if (animationFrameRef.current) {
+            cancelAnimationFrame(animationFrameRef.current);
+            animationFrameRef.current = null;
+          }
         }
       }
 
-      if (status === "rendering" && !animationFrameRef.current) {
-        idleTimer = setTimeout(() => {
-          setStatus("idle");
-        }, RENDER_IDLE_DELAY_MS);
+      // Set timer to return to idle when rendering is done
+      if (status === "rendering") {
+        // Check if animation is still in progress
+        const stillAnimating = newTextAnimationRef.current.active;
+        console.log("[DEBUG] Checking if should set timer - stillAnimating:", stillAnimating, "animationFrameRef:", !!animationFrameRef.current);
+        
+        if (!stillAnimating && !animationFrameRef.current) {
+          console.log("[DEBUG] Setting timer to return to idle after rendering");
+          idleTimer = setTimeout(() => {
+            console.log("[DEBUG] Timer fired, returning to idle");
+            setStatus("idle");
+          }, RENDER_IDLE_DELAY_MS);
+        }
       }
     };
 
