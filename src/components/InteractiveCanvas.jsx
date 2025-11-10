@@ -1,153 +1,39 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import {
+  FONT_SIZE_PX,
+  LINE_HEIGHT_PX,
+  RESULT_DISPLAY_DELAY_MS,
+  CANVAS_FADE_DURATION_MS,
+  RENDER_IDLE_DELAY_MS,
+  NEW_TEXT_FADE_DURATION_MS,
+  SILENCE_TIMEOUT_MS,
+  VOLUME_THRESHOLD,
+  VOLUME_CHECK_INTERVAL_MS,
+} from "../constants/appConstants";
+import { loadFlowerResources, willTextOverflow } from "../utils/flowerUtils";
 
-const FLOWER_SVG_URL = "/flower.svg";
-const FLOWER_TARGET_WIDTH = 730;
-const FLOWER_EXPANSION_SCALE = 1.05;
-const FLOWER_OFFSET_X = 5;
-const FONT_SIZE_PX = 15;
-const LINE_HEIGHT_PX = 21;
-const RESULT_DISPLAY_DELAY_MS = 1500;
-const CANVAS_FADE_DURATION_MS = 800;
-const RENDER_IDLE_DELAY_MS = 2000;
-const NEW_TEXT_FADE_DURATION_MS = 2500;
-const SILENCE_TIMEOUT_MS = 1000; // 1초간 침묵 시 인식 종료
-const VOLUME_THRESHOLD = 0.02; // 0.0 ~ 1.0 범위, 이 값 이상의 볼륨만 인식
-const VOLUME_CHECK_INTERVAL_MS = 100; // 볼륨 체크 간격
-
-let flowerResourcesPromise = null;
-
-async function loadFlowerResources() {
-  if (!flowerResourcesPromise) {
-    flowerResourcesPromise = (async () => {
-      const response = await fetch(FLOWER_SVG_URL);
-      const svgText = await response.text();
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(svgText, "image/svg+xml");
-      const svgElement = doc.querySelector("svg");
-      const pathData = doc.querySelector("path")?.getAttribute("d");
-      if (!pathData) {
-        throw new Error("No path found in SVG");
-      }
-
-      let baseWidth = 0;
-      let baseHeight = 0;
-      const viewBox = svgElement?.getAttribute("viewBox");
-      if (viewBox) {
-        const [, , width, height] = viewBox.trim().split(/\s+/).map(parseFloat);
-        baseWidth = width;
-        baseHeight = height;
-      }
-
-      const image = new Image();
-      image.src = FLOWER_SVG_URL;
-      await new Promise((resolve, reject) => {
-        image.onload = resolve;
-        image.onerror = () => reject(new Error("Failed to load flower image"));
-      });
-
-      if (!baseWidth || !baseHeight) {
-        baseWidth = image.naturalWidth || image.width;
-        baseHeight = image.naturalHeight || image.height;
-      }
-
-      const flowerWidth = FLOWER_TARGET_WIDTH;
-      const flowerHeight = (baseHeight / baseWidth) * flowerWidth;
-
-      const basePath = new Path2D(pathData);
-      const scaleX = flowerWidth / baseWidth;
-      const scaleY = flowerHeight / baseHeight;
-
-      const expandedMatrix = new DOMMatrix()
-        .scale(scaleX * FLOWER_EXPANSION_SCALE, scaleY * FLOWER_EXPANSION_SCALE)
-        .translate(-FLOWER_OFFSET_X, 0);
-      const expandedPath = new Path2D();
-      expandedPath.addPath(basePath, expandedMatrix);
-
-      const originalMatrix = new DOMMatrix().scale(scaleX, scaleY);
-      const originalPath = new Path2D();
-      originalPath.addPath(basePath, originalMatrix);
-
-      return {
-        image,
-        flowerWidth,
-        flowerHeight,
-        expandedPath,
-        originalPath,
-      };
-    })();
-  }
-
-  return flowerResourcesPromise;
-}
-
-async function willTextOverflow(textItems) {
-  if (textItems.length === 0) {
-    return false;
-  }
-
-  const { expandedPath, flowerWidth, flowerHeight } = await loadFlowerResources();
-  const canvas = document.createElement("canvas");
-  canvas.width = flowerWidth;
-  canvas.height = flowerHeight;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    return false;
-  }
-
-  ctx.font = `${FONT_SIZE_PX}px Eulyoo1945`;
-  const fullText = textItems.join(" ");
-  const characters = fullText.split("");
-  let charIndex = 0;
-
-  for (let y = flowerHeight - LINE_HEIGHT_PX; y >= 0 && charIndex < characters.length; y -= LINE_HEIGHT_PX) {
-    let x = 0;
-    let inPath = false;
-    let startX = 0;
-    const ranges = [];
-
-    while (x < flowerWidth) {
-      const inside = ctx.isPointInPath(expandedPath, x, y);
-      if (inside && !inPath) {
-        startX = x;
-        inPath = true;
-      } else if (!inside && inPath) {
-        ranges.push([startX, x]);
-        inPath = false;
-      }
-      x += 1;
-    }
-    if (inPath) {
-      ranges.push([startX, flowerWidth]);
-    }
-
-    for (const [xStart, xEnd] of ranges) {
-      let currX = xStart;
-      while (charIndex < characters.length && currX < xEnd) {
-        const width = ctx.measureText(characters[charIndex]).width;
-        if (currX + width > xEnd) {
-          break;
-        }
-        currX += width;
-        charIndex += 1;
-      }
-      if (charIndex >= characters.length) {
-        break;
-      }
-    }
-  }
-
-  return charIndex < characters.length;
-}
-
+/**
+ * 음성 인식 기반 인터랙티브 캔버스 컴포넌트
+ * 사용자의 음성을 인식하여 꽃 모양 내부에 텍스트를 렌더링합니다.
+ * @returns {JSX.Element} 인터랙티브 캔버스 컴포넌트
+ */
 export default function InteractiveCanvas() {
   const canvasRef = useRef(null);
   const [text, setText] = useState(() => {
     const savedText = localStorage.getItem("flowerText");
     return savedText ? JSON.parse(savedText) : [];
   });
-  const [status, setStatus] = useState("idle"); // idle | listening | done | rendering | clearing
+  /**
+   * 컴포넌트 상태
+   * @type {"idle" | "listening" | "done" | "rendering" | "clearing"}
+   */
+  const [status, setStatus] = useState("idle");
   const [lastTranscript, setLastTranscript] = useState("");
-  const [fadePhase, setFadePhase] = useState("idle"); // idle | out | in
+  /**
+   * 페이드 애니메이션 단계
+   * @type {"idle" | "out" | "in"}
+   */
+  const [fadePhase, setFadePhase] = useState("idle");
 
   const recognitionRef = useRef(null);
   const resultTimerRef = useRef(null);
@@ -205,9 +91,13 @@ export default function InteractiveCanvas() {
     [clearResultTimer],
   );
 
+  /**
+   * 오디오 모니터링 설정
+   * 마이크 입력의 볼륨을 측정하기 위한 Web Audio API 설정
+   */
   const setupAudioMonitoring = useCallback(async () => {
     if (audioContextRef.current) {
-      return; // Already set up
+      return;
     }
 
     try {
@@ -225,13 +115,15 @@ export default function InteractiveCanvas() {
 
       const microphone = audioContext.createMediaStreamSource(stream);
       microphone.connect(analyser);
-
-      console.log("[DEBUG] Audio monitoring setup complete");
     } catch (error) {
       console.error("Failed to setup audio monitoring:", error);
     }
   }, []);
 
+  /**
+   * 현재 마이크 입력 볼륨 측정
+   * @returns {number} 0.0 ~ 1.0 범위의 정규화된 볼륨 값
+   */
   const getCurrentVolume = useCallback(() => {
     if (!analyserRef.current) {
       return 0;
@@ -245,9 +137,14 @@ export default function InteractiveCanvas() {
       sum += dataArray[i];
     }
     const average = sum / dataArray.length;
-    return average / 255; // 0.0 ~ 1.0 범위로 정규화
+    return average / 255;
   }, []);
 
+  /**
+   * 인식된 트랜스크립트 처리
+   * 텍스트 오버플로우 확인 후 캔버스 초기화 또는 렌더링 수행
+   * @param {string} transcript - 인식된 텍스트
+   */
   const handleTranscript = useCallback(
     async (transcript) => {
       clearResultTimer();
@@ -288,15 +185,17 @@ export default function InteractiveCanvas() {
     [clearResultTimer],
   );
 
+  /**
+   * 음성 인식 최종 처리
+   * 수집된 모든 트랜스크립트를 결합하여 처리
+   */
   const finalizeRecognition = useCallback(() => {
-    console.log("[DEBUG] Finalizing recognition");
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
 
     const fullTranscript = collectedTranscriptsRef.current.join(" ").trim();
-    console.log("[DEBUG] Full collected transcript:", fullTranscript);
     collectedTranscriptsRef.current = [];
 
     if (fullTranscript) {
@@ -310,27 +209,32 @@ export default function InteractiveCanvas() {
       setStatus("idle");
     }
 
-    // Stop recognition
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
-      } catch (error) {
-        console.log("[DEBUG] Error stopping recognition:", error);
+      } catch {
+        // Ignore stop errors
       }
     }
   }, [clearResultTimer, handleTranscript]);
 
+  /**
+   * 침묵 타이머 리셋
+   * 음성이 감지될 때마다 호출되어 타이머를 다시 시작
+   */
   const resetSilenceTimer = useCallback(() => {
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
     }
-    console.log("[DEBUG] Resetting silence timer");
     silenceTimerRef.current = setTimeout(() => {
-      console.log("[DEBUG] Silence timeout reached");
       finalizeRecognition();
     }, SILENCE_TIMEOUT_MS);
   }, [finalizeRecognition]);
 
+  /**
+   * 음성 인식 시작
+   * Web Speech API를 사용하여 연속 음성 인식 시작
+   */
   const startListening = useCallback(() => {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -340,60 +244,45 @@ export default function InteractiveCanvas() {
       return;
     }
 
-    // Reset collected transcripts
     collectedTranscriptsRef.current = [];
 
     if (!recognitionRef.current) {
       const recognition = new SpeechRecognition();
       recognition.lang = "ko-KR";
-      recognition.interimResults = true; // Enable interim results
-      recognition.continuous = true; // Enable continuous recognition
+      recognition.interimResults = true;
+      recognition.continuous = true;
       recognition.maxAlternatives = 1;
 
       recognition.onspeechstart = () => {
-        console.log("[DEBUG] Speech detected");
         setStatus("listening");
         resetSilenceTimer();
       };
 
       recognition.onresult = (event) => {
-        console.log("[DEBUG] Recognition result received");
-        
-        // Get the latest result
         const lastResultIndex = event.results.length - 1;
         const result = event.results[lastResultIndex];
         const transcript = result[0].transcript.trim();
         
         if (result.isFinal && transcript) {
-          console.log("[DEBUG] Final transcript segment:", transcript);
           collectedTranscriptsRef.current.push(transcript);
-          // Reset silence timer on each final result
           resetSilenceTimer();
         } else if (!result.isFinal && transcript) {
-          console.log("[DEBUG] Interim transcript:", transcript);
-          // Also reset timer on interim results (indicates ongoing speech)
           resetSilenceTimer();
         }
       };
 
       recognition.onerror = (event) => {
-        console.log("[DEBUG] Recognition error:", event.error);
         if (event.error !== "no-speech" && event.error !== "aborted") {
           console.error("Speech recognition error", event.error);
         }
         
-        // On error, finalize if we have any collected transcripts
         if (collectedTranscriptsRef.current.length > 0) {
           finalizeRecognition();
         }
       };
 
       recognition.onend = () => {
-        console.log("[DEBUG] Recognition ended, current status will be checked");
-        setStatus((current) => {
-          console.log("[DEBUG] Current status on end:", current);
-          return current === "listening" ? "idle" : current;
-        });
+        setStatus((current) => (current === "listening" ? "idle" : current));
       };
 
       recognitionRef.current = recognition;
@@ -401,7 +290,6 @@ export default function InteractiveCanvas() {
 
     try {
       recognitionRef.current.start();
-      console.log("[DEBUG] Recognition started");
     } catch (error) {
       if (error.name !== "InvalidStateError") {
         console.error("Speech recognition could not be started", error);
@@ -410,17 +298,18 @@ export default function InteractiveCanvas() {
     }
   }, [resetSilenceTimer, finalizeRecognition]);
 
-  // Setup audio monitoring on mount
+  /**
+   * 컴포넌트 마운트 시 오디오 모니터링 초기화
+   */
   useEffect(() => {
     setupAudioMonitoring();
   }, [setupAudioMonitoring]);
 
-  // Monitor volume and start listening when threshold is exceeded
+  /**
+   * 볼륨 모니터링 및 임계값 초과 시 음성 인식 시작
+   */
   useEffect(() => {
-    console.log("[DEBUG] Status changed to:", status);
     if (status === "idle") {
-      console.log("[DEBUG] Status is idle, monitoring volume for activation");
-      
       if (volumeCheckIntervalRef.current) {
         clearInterval(volumeCheckIntervalRef.current);
       }
@@ -428,7 +317,6 @@ export default function InteractiveCanvas() {
       volumeCheckIntervalRef.current = setInterval(() => {
         const volume = getCurrentVolume();
         if (volume >= VOLUME_THRESHOLD) {
-          console.log("[DEBUG] Volume threshold exceeded:", volume.toFixed(3), "starting recognition");
           clearInterval(volumeCheckIntervalRef.current);
           volumeCheckIntervalRef.current = null;
           startListening();
@@ -444,6 +332,9 @@ export default function InteractiveCanvas() {
     }
   }, [getCurrentVolume, startListening, status]);
 
+  /**
+   * 캔버스 렌더링 및 애니메이션 처리
+   */
   useEffect(() => {
     if (status !== "idle" && status !== "rendering") {
       return;
@@ -457,8 +348,17 @@ export default function InteractiveCanvas() {
     let cancelled = false;
     let idleTimer = null;
 
+    /**
+     * Ease-out 애니메이션 함수
+     * @param {number} t - 0.0 ~ 1.0 범위의 시간 진행도
+     * @returns {number} 애니메이션 진행률
+     */
     const easeOut = (t) => 1 - Math.pow(1 - t, 3);
 
+    /**
+     * 캔버스 프레임 그리기
+     * @param {Object} resources - 꽃 리소스 객체
+     */
     const drawFrame = (resources) => {
       if (cancelled) return;
 
@@ -553,11 +453,9 @@ export default function InteractiveCanvas() {
         }
 
         if (animationState.active && progress >= 1) {
-          console.log("[DEBUG] Animation completed");
           animationState.active = false;
           animationState.startTime = null;
           previousCharCountRef.current = characters.length;
-          // Clear animation frame ref since animation is done
           if (animationFrameRef.current) {
             cancelAnimationFrame(animationFrameRef.current);
             animationFrameRef.current = null;
@@ -565,16 +463,11 @@ export default function InteractiveCanvas() {
         }
       }
 
-      // Set timer to return to idle when rendering is done
       if (status === "rendering") {
-        // Check if animation is still in progress
         const stillAnimating = newTextAnimationRef.current.active;
-        console.log("[DEBUG] Checking if should set timer - stillAnimating:", stillAnimating, "animationFrameRef:", !!animationFrameRef.current);
         
         if (!stillAnimating && !animationFrameRef.current) {
-          console.log("[DEBUG] Setting timer to return to idle after rendering");
           idleTimer = setTimeout(() => {
-            console.log("[DEBUG] Timer fired, returning to idle");
             setStatus("idle");
           }, RENDER_IDLE_DELAY_MS);
         }
@@ -606,6 +499,10 @@ export default function InteractiveCanvas() {
     };
   }, [status, text]);
 
+  /**
+   * 캔버스 페이드 트랜지션 완료 처리
+   * 페이드아웃 후 새 텍스트로 교체하고 페이드인 시작
+   */
   const handleCanvasTransitionEnd = useCallback(() => {
     if (fadePhase === "out") {
       const pending = pendingTranscriptRef.current;
