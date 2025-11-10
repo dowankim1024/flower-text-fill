@@ -10,6 +10,7 @@ const RESULT_DISPLAY_DELAY_MS = 1500;
 const CANVAS_FADE_DURATION_MS = 800;
 const RENDER_IDLE_DELAY_MS = 2000;
 const NEW_TEXT_FADE_DURATION_MS = 3000;
+const SILENCE_TIMEOUT_MS = 1500; // 1.5초간 침묵 시 인식 종료
 
 let flowerResourcesPromise = null;
 
@@ -157,6 +158,8 @@ export default function InteractiveCanvas() {
     startTime: null,
     duration: NEW_TEXT_FADE_DURATION_MS,
   });
+  const silenceTimerRef = useRef(null);
+  const collectedTranscriptsRef = useRef([]);
 
   useEffect(() => {
     textRef.current = text;
@@ -177,7 +180,15 @@ export default function InteractiveCanvas() {
     }
   }, []);
 
-  useEffect(() => () => clearResultTimer(), [clearResultTimer]);
+  useEffect(
+    () => () => {
+      clearResultTimer();
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+      }
+    },
+    [clearResultTimer],
+  );
 
   const handleTranscript = useCallback(
     async (transcript) => {
@@ -219,6 +230,49 @@ export default function InteractiveCanvas() {
     [clearResultTimer],
   );
 
+  const finalizeRecognition = useCallback(() => {
+    console.log("[DEBUG] Finalizing recognition");
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+
+    const fullTranscript = collectedTranscriptsRef.current.join(" ").trim();
+    console.log("[DEBUG] Full collected transcript:", fullTranscript);
+    collectedTranscriptsRef.current = [];
+
+    if (fullTranscript) {
+      setLastTranscript(fullTranscript);
+      setStatus("done");
+      clearResultTimer();
+      resultTimerRef.current = setTimeout(() => {
+        handleTranscript(fullTranscript);
+      }, RESULT_DISPLAY_DELAY_MS);
+    } else {
+      setStatus("idle");
+    }
+
+    // Stop recognition
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (error) {
+        console.log("[DEBUG] Error stopping recognition:", error);
+      }
+    }
+  }, [clearResultTimer, handleTranscript]);
+
+  const resetSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+    }
+    console.log("[DEBUG] Resetting silence timer");
+    silenceTimerRef.current = setTimeout(() => {
+      console.log("[DEBUG] Silence timeout reached");
+      finalizeRecognition();
+    }, SILENCE_TIMEOUT_MS);
+  }, [finalizeRecognition]);
+
   const startListening = useCallback(() => {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -228,36 +282,51 @@ export default function InteractiveCanvas() {
       return;
     }
 
+    // Reset collected transcripts
+    collectedTranscriptsRef.current = [];
+
     if (!recognitionRef.current) {
       const recognition = new SpeechRecognition();
       recognition.lang = "ko-KR";
-      recognition.interimResults = false;
+      recognition.interimResults = true; // Enable interim results
+      recognition.continuous = true; // Enable continuous recognition
       recognition.maxAlternatives = 1;
 
       recognition.onspeechstart = () => {
         console.log("[DEBUG] Speech detected");
         setStatus("listening");
+        resetSilenceTimer();
       };
 
       recognition.onresult = (event) => {
         console.log("[DEBUG] Recognition result received");
-        const transcript = event.results[0][0].transcript.trim();
-        if (!transcript) {
-          return;
+        
+        // Get the latest result
+        const lastResultIndex = event.results.length - 1;
+        const result = event.results[lastResultIndex];
+        const transcript = result[0].transcript.trim();
+        
+        if (result.isFinal && transcript) {
+          console.log("[DEBUG] Final transcript segment:", transcript);
+          collectedTranscriptsRef.current.push(transcript);
+          // Reset silence timer on each final result
+          resetSilenceTimer();
+        } else if (!result.isFinal && transcript) {
+          console.log("[DEBUG] Interim transcript:", transcript);
+          // Also reset timer on interim results (indicates ongoing speech)
+          resetSilenceTimer();
         }
-        console.log("[DEBUG] Transcript:", transcript);
-        setLastTranscript(transcript);
-        setStatus("done");
-        clearResultTimer();
-        resultTimerRef.current = setTimeout(() => {
-          handleTranscript(transcript);
-        }, RESULT_DISPLAY_DELAY_MS);
       };
 
       recognition.onerror = (event) => {
         console.log("[DEBUG] Recognition error:", event.error);
         if (event.error !== "no-speech" && event.error !== "aborted") {
           console.error("Speech recognition error", event.error);
+        }
+        
+        // On error, finalize if we have any collected transcripts
+        if (collectedTranscriptsRef.current.length > 0) {
+          finalizeRecognition();
         }
       };
 
@@ -274,13 +343,14 @@ export default function InteractiveCanvas() {
 
     try {
       recognitionRef.current.start();
+      console.log("[DEBUG] Recognition started");
     } catch (error) {
       if (error.name !== "InvalidStateError") {
         console.error("Speech recognition could not be started", error);
         setStatus("idle");
       }
     }
-  }, [clearResultTimer, handleTranscript]);
+  }, [resetSilenceTimer, finalizeRecognition]);
 
   useEffect(() => {
     console.log("[DEBUG] Status changed to:", status);
