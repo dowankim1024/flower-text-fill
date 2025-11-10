@@ -120,7 +120,7 @@ export default function InteractiveCanvas() {
         const img = new Image();
         img.src = svgUrl;
         img.onload = () => {
-          const flowerWidth = 730;
+          const flowerWidth = 730; // 67.6vmin (730/1080*100)
           const flowerHeight = (img.height / img.width) * flowerWidth;
 
           const path = new Path2D();
@@ -133,7 +133,7 @@ export default function InteractiveCanvas() {
           const expandedScaleX = scaleX * 1.05; // Adjust this value as needed
           const expandedScaleY = scaleY * 1.05; // Adjust this value as needed
           // Add a small negative translation to shift the expanded path to the left
-          const offsetX = 5; // Example: 5 pixels to the left, adjust as needed
+          const offsetX = 5; // 0.46vmin (5/1080*100)
           const matrix = new DOMMatrix().scale(expandedScaleX, expandedScaleY).translate(-offsetX, 0);
           path.addPath(new Path2D(d), matrix);
 
@@ -146,11 +146,16 @@ export default function InteractiveCanvas() {
           canvas.height = flowerHeight;
 
           ctx.clearRect(0, 0, canvas.width, canvas.height);
+          
+          // SVG 이미지를 반투명하게 그리기
+          ctx.save();
+          ctx.globalAlpha = 0.08; // 불투명도 조절 (0.0 = 완전 투명, 1.0 = 완전 불투명)
           ctx.drawImage(img, 0, 0, flowerWidth, flowerHeight);
+          ctx.restore();
 
           // Draw all accumulated text
           if (text.length > 0) {
-            ctx.font = "15px Eulyoo1945";
+            ctx.font = "1.39vmin Eulyoo1945"; // 15px -> 1.39vmin
             ctx.fillStyle = "#1a1a1a";
 
             // Save the context state before applying clip
@@ -160,7 +165,7 @@ export default function InteractiveCanvas() {
 
             const fullText = text.join(" "); // Combine all accumulated texts
             const characters = fullText.split("");
-            const lineHeight = 21; // 140% of 15px (15 * 1.4 = 21)
+            const lineHeight = 21; // 1.94vmin (21/1080*100) - 140% of 15px
             let charIndex = 0;
 
             // Start drawing from the bottom of the canvas
@@ -239,12 +244,12 @@ export default function InteractiveCanvas() {
       <div
         style={{
           transition: "filter 0.5s ease-in-out",
-          filter: isBlurred ? "blur(8px)" : "none",
+          filter: isBlurred ? "blur(0.74vmin)" : "none", // 8px -> 0.74vmin
         }}
       >
         <canvas
           ref={canvasRef}
-          style={{ width: "730px", height: "auto", display: "block" }}
+          style={{ width: "67.6vmin", height: "auto", display: "block" }} // 730px -> 67.6vmin
         />
       </div>
 
@@ -263,9 +268,9 @@ export default function InteractiveCanvas() {
               <img
                 src="/mic.png"
                 alt="mic"
-                style={{ width: "48px", marginBottom: "20px" }}
+                style={{ width: "4.44vmin", marginBottom: "1.85vmin" }} // 48px->4.44vmin, 20px->1.85vmin
               />
-              <p style={{ fontSize: "36px", color: "#333", fontFamily: "Eulyoo1945" }}>
+              <p style={{ fontSize: "3.33vmin", color: "#333", fontFamily: "Eulyoo1945" }}> // 36px -> 3.33vmin
                 방명록을 남겨주세요.
               </p>
             </>
@@ -275,18 +280,18 @@ export default function InteractiveCanvas() {
             <>
               <p
                 style={{
-                  fontSize: "48px",
-                  marginBottom: "30px",
-                  maxWidth: "600px",
+                  fontSize: "4.44vmin", // 48px -> 4.44vmin
+                  marginBottom: "2.78vmin", // 30px -> 2.78vmin
+                  maxWidth: "55.56vmin", // 600px -> 55.56vmin
                   lineHeight: 1.5,
                   color: "#333",
-                  padding: "0 20px",
+                  padding: "0 1.85vmin", // 20px -> 1.85vmin
                   fontFamily: "Eulyoo1945",
                 }}
               >
                 {text.length > 0 ? text[text.length - 1].trim() : ""} {/* Display last recognized text */}
               </p>
-              <img src="/mic.png" alt="mic" style={{ width: "36px" }} />
+              <img src="/mic.png" alt="mic" style={{ width: "3.33vmin" }} /> // 36px -> 3.33vmin
             </>
           )}
         </div>
