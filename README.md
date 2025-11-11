@@ -7,8 +7,7 @@
 처음엔 아무것도 보이지 않는다. 하지만 흔적이 모이며, 보이지 않던 형태가 드러난다.
 이것은 우리가 무언가를 클로즈업해서 보게 될 때, 처음엔 이해할 수 없지만 시간이 지나고 시선이 넓어질수록 점점 그 의미를 알아가는 과정과 닮아 있다.
 
-<img width="3420" height="2224" alt="image" src="https://github.com/user-attachments/assets/4cbe0f25-3a64-4c54-8bbd-41c20febf26b" />
-
+<img width="1920" height="1080" alt="202732" src="https://github.com/user-attachments/assets/4af9f3ee-b0ac-4108-b45f-4655de45265e" />
 
 방문자가 마이크에 대고 남긴 말을 꽃 모양 내부에 한 글자씩 채워 넣는 웹 애플리케이션입니다. Web Speech API, Web Audio API, Canvas API를 조합해 전시 환경에서도 안정적으로 동작하도록 설계했으며, 음성 인식 → 확인 → 렌더링 → 대기 과정을 끊김 없이 반복합니다.
 
