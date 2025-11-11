@@ -12,6 +12,11 @@ import {
 } from "../constants/appConstants";
 import { loadFlowerResources, willTextOverflow } from "../utils/flowerUtils";
 
+const LOG_PREFIX = "[InteractiveCanvas]";
+const log = (...args) => console.log(LOG_PREFIX, ...args);
+const warn = (...args) => console.warn(LOG_PREFIX, ...args);
+const errorLog = (...args) => console.error(LOG_PREFIX, ...args);
+
 /**
  * 음성 인식 기반 인터랙티브 캔버스 컴포넌트
  * 사용자의 음성을 인식하여 꽃 모양 내부에 텍스트를 렌더링합니다.
@@ -46,6 +51,9 @@ export default function InteractiveCanvas() {
     startTime: null,
     duration: NEW_TEXT_FADE_DURATION_MS,
   });
+  const recognitionActiveRef = useRef(false);
+  const pendingRecognitionStartRef = useRef(false);
+  const statusRef = useRef("idle");
   const silenceTimerRef = useRef(null);
   const collectedTranscriptsRef = useRef([]);
   const audioContextRef = useRef(null);
@@ -65,8 +73,13 @@ export default function InteractiveCanvas() {
     }
   }, [text]);
 
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
   const clearResultTimer = useCallback(() => {
     if (resultTimerRef.current) {
+      log("Clearing result timer");
       clearTimeout(resultTimerRef.current);
       resultTimerRef.current = null;
     }
@@ -75,6 +88,7 @@ export default function InteractiveCanvas() {
   useEffect(
     () => () => {
       clearResultTimer();
+      log("Component unmount: clearing timers and audio resources");
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
       }
@@ -102,6 +116,7 @@ export default function InteractiveCanvas() {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      log("Audio stream acquired");
       micStreamRef.current = stream;
 
       const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -116,7 +131,7 @@ export default function InteractiveCanvas() {
       const microphone = audioContext.createMediaStreamSource(stream);
       microphone.connect(analyser);
     } catch (error) {
-      console.error("Failed to setup audio monitoring:", error);
+      errorLog("Failed to setup audio monitoring:", error);
     }
   }, []);
 
@@ -149,19 +164,24 @@ export default function InteractiveCanvas() {
     async (transcript) => {
       clearResultTimer();
       if (!transcript) {
+        log("Received empty transcript, returning to idle");
         setStatus("idle");
         return;
       }
+
+      log("Handling transcript:", transcript);
 
       try {
         const candidate = [...textRef.current, transcript];
         const overflow = await willTextOverflow(candidate);
 
         if (overflow) {
+          log("Canvas overflow detected. Pending transcript stored.");
           pendingTranscriptRef.current = transcript;
           setFadePhase("out");
           setStatus("clearing");
         } else {
+          log("Appending transcript to canvas", transcript);
           pendingTranscriptRef.current = null;
           const previousFullText = textRef.current.join(" ");
           previousCharCountRef.current = previousFullText.length;
@@ -178,7 +198,7 @@ export default function InteractiveCanvas() {
           setStatus("rendering");
         }
       } catch (error) {
-        console.error("Failed to process transcript", error);
+        errorLog("Failed to process transcript", error);
         setStatus("idle");
       }
     },
@@ -191,11 +211,13 @@ export default function InteractiveCanvas() {
    */
   const finalizeRecognition = useCallback(() => {
     if (silenceTimerRef.current) {
+      log("Clearing silence timer in finalizeRecognition");
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
 
     const fullTranscript = collectedTranscriptsRef.current.join(" ").trim();
+    log("Finalize recognition with transcript:", fullTranscript);
     collectedTranscriptsRef.current = [];
 
     if (fullTranscript) {
@@ -203,17 +225,20 @@ export default function InteractiveCanvas() {
       setStatus("done");
       clearResultTimer();
       resultTimerRef.current = setTimeout(() => {
+        log("Scheduling transcript render after delay");
         handleTranscript(fullTranscript);
       }, RESULT_DISPLAY_DELAY_MS);
     } else {
+      log("No transcript collected. Returning to idle");
       setStatus("idle");
     }
 
     if (recognitionRef.current) {
       try {
+        log("Stopping recognition session from finalizeRecognition");
         recognitionRef.current.stop();
       } catch {
-        // Ignore stop errors
+        warn("Failed to stop recognition (already stopped)");
       }
     }
   }, [clearResultTimer, handleTranscript]);
@@ -224,8 +249,10 @@ export default function InteractiveCanvas() {
    */
   const resetSilenceTimer = useCallback(() => {
     if (silenceTimerRef.current) {
+      log("Resetting existing silence timer");
       clearTimeout(silenceTimerRef.current);
     }
+    log("Starting silence timer", SILENCE_TIMEOUT_MS, "ms");
     silenceTimerRef.current = setTimeout(() => {
       finalizeRecognition();
     }, SILENCE_TIMEOUT_MS);
@@ -240,13 +267,22 @@ export default function InteractiveCanvas() {
       window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
+      errorLog("SpeechRecognition API not available");
       alert("이 브라우저는 음성 인식을 지원하지 않습니다.");
       return;
     }
 
+    if (recognitionActiveRef.current) {
+      warn("Recognition already active. Deferring new start request");
+      pendingRecognitionStartRef.current = true;
+      return;
+    }
+
     collectedTranscriptsRef.current = [];
+    log("Starting new recognition session");
 
     if (!recognitionRef.current) {
+      log("Creating new SpeechRecognition instance");
       const recognition = new SpeechRecognition();
       recognition.lang = "ko-KR";
       recognition.interimResults = true;
@@ -254,6 +290,7 @@ export default function InteractiveCanvas() {
       recognition.maxAlternatives = 1;
 
       recognition.onspeechstart = () => {
+        log("Speech detected - switching to listening state");
         setStatus("listening");
         resetSilenceTimer();
       };
@@ -262,27 +299,53 @@ export default function InteractiveCanvas() {
         const lastResultIndex = event.results.length - 1;
         const result = event.results[lastResultIndex];
         const transcript = result[0].transcript.trim();
+        log(
+          "Recognition result",
+          result.isFinal ? "final" : "interim",
+          "transcript:",
+          transcript,
+        );
         
         if (result.isFinal && transcript) {
           collectedTranscriptsRef.current.push(transcript);
+          log("Stored final transcript segment", transcript);
           resetSilenceTimer();
         } else if (!result.isFinal && transcript) {
+          log("Interim transcript segment", transcript);
           resetSilenceTimer();
         }
       };
 
       recognition.onerror = (event) => {
-        if (event.error !== "no-speech" && event.error !== "aborted") {
-          console.error("Speech recognition error", event.error);
+        if (event.error === "aborted") {
+          log("Recognition aborted by stop()");
+          recognitionActiveRef.current = false;
+          setStatus((current) => (current === "listening" ? "idle" : current));
+          return;
         }
-        
-        if (collectedTranscriptsRef.current.length > 0) {
-          finalizeRecognition();
+
+        if (event.error !== "no-speech") {
+          errorLog("Speech recognition error", event.error);
+        } else {
+          warn("No speech detected during recognition session");
         }
+
+        finalizeRecognition();
       };
 
       recognition.onend = () => {
-        setStatus((current) => (current === "listening" ? "idle" : current));
+        recognitionActiveRef.current = false;
+        setStatus((current) => {
+          log("Recognition ended - previous status", current);
+          return current === "listening" ? "idle" : current;
+        });
+        if (pendingRecognitionStartRef.current && statusRef.current === "idle") {
+          log("Processing deferred recognition start");
+          pendingRecognitionStartRef.current = false;
+          setTimeout(() => {
+            startListening();
+          }, 0);
+        }
       };
 
       recognitionRef.current = recognition;
@@ -290,10 +353,15 @@ export default function InteractiveCanvas() {
 
     try {
       recognitionRef.current.start();
+      recognitionActiveRef.current = true;
+      pendingRecognitionStartRef.current = false;
+      log("SpeechRecognition.start() invoked");
     } catch (error) {
       if (error.name !== "InvalidStateError") {
-        console.error("Speech recognition could not be started", error);
+        errorLog("Speech recognition could not be started", error);
         setStatus("idle");
+      } else {
+        warn("SpeechRecognition.start() ignored: already running");
       }
     }
   }, [resetSilenceTimer, finalizeRecognition]);
@@ -310,13 +378,16 @@ export default function InteractiveCanvas() {
    */
   useEffect(() => {
     if (status === "idle") {
+      log("Status=idle: starting volume monitor interval");
       if (volumeCheckIntervalRef.current) {
         clearInterval(volumeCheckIntervalRef.current);
       }
 
       volumeCheckIntervalRef.current = setInterval(() => {
         const volume = getCurrentVolume();
+        log("Volume check", volume.toFixed(4));
         if (volume >= VOLUME_THRESHOLD) {
+          log("Volume threshold exceeded", volume);
           clearInterval(volumeCheckIntervalRef.current);
           volumeCheckIntervalRef.current = null;
           startListening();
@@ -325,6 +396,7 @@ export default function InteractiveCanvas() {
 
       return () => {
         if (volumeCheckIntervalRef.current) {
+          log("Clearing volume monitor interval");
           clearInterval(volumeCheckIntervalRef.current);
           volumeCheckIntervalRef.current = null;
         }
@@ -339,6 +411,8 @@ export default function InteractiveCanvas() {
     if (status !== "idle" && status !== "rendering") {
       return;
     }
+
+    log("Render effect running with status", status, "text length", text.length);
 
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
@@ -361,6 +435,8 @@ export default function InteractiveCanvas() {
      */
     const drawFrame = (resources) => {
       if (cancelled) return;
+
+      log("Drawing frame", { status, fadePhase, textLength: text.length });
 
       const { image, expandedPath, originalPath, flowerWidth, flowerHeight } = resources;
       const canvas = canvasRef.current;
@@ -467,7 +543,9 @@ export default function InteractiveCanvas() {
         const stillAnimating = newTextAnimationRef.current.active;
         
         if (!stillAnimating && !animationFrameRef.current) {
+          log("Scheduling idle transition after rendering");
           idleTimer = setTimeout(() => {
+            log("Idle transition timer fired");
             setStatus("idle");
           }, RENDER_IDLE_DELAY_MS);
         }
@@ -490,20 +568,23 @@ export default function InteractiveCanvas() {
     return () => {
       cancelled = true;
       if (animationFrameRef.current) {
+        log("Cancelling pending animation frame in cleanup");
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
       }
       if (idleTimer) {
+        log("Clearing idle transition timer in cleanup");
         clearTimeout(idleTimer);
       }
     };
-  }, [status, text]);
+  }, [status, text, fadePhase]);
 
   /**
    * 캔버스 페이드 트랜지션 완료 처리
    * 페이드아웃 후 새 텍스트로 교체하고 페이드인 시작
    */
   const handleCanvasTransitionEnd = useCallback(() => {
+    log("Canvas transition end", fadePhase);
     if (fadePhase === "out") {
       const pending = pendingTranscriptRef.current;
       pendingTranscriptRef.current = null;
