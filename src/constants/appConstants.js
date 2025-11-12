@@ -55,13 +55,13 @@ export const CANVAS_FADE_DURATION_MS = 800;
  * 렌더링 완료 후 idle 상태로 복귀하는 대기 시간 (밀리초)
  * @type {number}
  */
-export const RENDER_IDLE_DELAY_MS = 2000;
+export const RENDER_IDLE_DELAY_MS = 500;
 
 /**
  * 새 텍스트 페이드인 애니메이션 지속 시간 (밀리초)
  * @type {number}
  */
-export const NEW_TEXT_FADE_DURATION_MS = 2500;
+export const NEW_TEXT_FADE_DURATION_MS = 1500;
 
 /**
  * 침묵 지속 시 음성 인식 종료 타임아웃 (밀리초)

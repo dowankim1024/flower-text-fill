@@ -233,13 +233,15 @@ export default function InteractiveCanvas() {
       setStatus("idle");
     }
 
-    if (recognitionRef.current) {
+    if (recognitionRef.current && recognitionActiveRef.current) {
       try {
         log("Stopping recognition session from finalizeRecognition");
         recognitionRef.current.stop();
       } catch {
         warn("Failed to stop recognition (already stopped)");
       }
+    } else {
+      log("Recognition already stopped when finalizeRecognition executed");
     }
   }, [clearResultTimer, handleTranscript]);
 
@@ -276,6 +278,12 @@ export default function InteractiveCanvas() {
       warn("Recognition already active. Deferring new start request");
       pendingRecognitionStartRef.current = true;
       return;
+    }
+
+    if (silenceTimerRef.current) {
+      log("Clearing pending silence timer before starting new session");
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
     }
 
     collectedTranscriptsRef.current = [];
@@ -335,6 +343,11 @@ export default function InteractiveCanvas() {
 
       recognition.onend = () => {
         recognitionActiveRef.current = false;
+        if (collectedTranscriptsRef.current.length > 0) {
+          log("Recognition ended with pending transcripts. Finalizing now.");
+          finalizeRecognition();
+          return;
+        }
         setStatus((current) => {
           log("Recognition ended - previous status", current);
           return current === "listening" ? "idle" : current;
