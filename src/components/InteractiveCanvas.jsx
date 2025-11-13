@@ -336,8 +336,10 @@ export default function InteractiveCanvas() {
           errorLog("Speech recognition error", event.error);
         } else {
           warn("No speech detected during recognition session");
+          pendingRecognitionStartRef.current = true;
         }
 
+        recognitionActiveRef.current = false;
         finalizeRecognition();
       };
 

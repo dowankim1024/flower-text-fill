@@ -193,6 +193,7 @@ my-vite-react-app/
 | 상수/유틸리티 관리 | 여러 파일에 하드코딩된 값과 함수로 유지보수가 어려움 | `src/constants/appConstants.js`, `src/utils/flowerUtils.js`로 분리하고 모든 파일에 JSDoc을 추가해 IDE 자동완성을 강화 |
 | Recognition 재시작 누락 | 바람 등 순간적인 소음으로 인식이 시작됐다가 빈 transcript로 종료된 뒤, `SpeechRecognition.start()`가 `already running` 경고와 함께 무시되어 이후 어떤 소리를 내도 다시 인식이 시작되지 않음 | `recognitionActiveRef`와 `pendingRecognitionStartRef`를 도입해 세션 종료(onend) 시점에 지연된 요청을 재실행하도록 변경. `startListening()`에서 실행 중인 세션이 있으면 재시작을 큐잉하고, `onend`에서 플래그를 초기화한 뒤 대기 중인 요청을 즉시 재시작하도록 처리 |
 | Recognition 세션 중첩 | 긴 문장이나 잡음으로 기존 세션이 완전히 종료되기 전에 새로운 `startListening()`이 호출되어 `SpeechRecognition.start()`가 무시되고, 이어서 침묵 타이머가 빈 transcript로 `finalizeRecognition()`을 실행해 이후 인식이 멈춰 버림 | `recognitionActiveRef`/`pendingRecognitionStartRef`로 실행 중 세션을 추적하여 중복 시작을 큐잉하고, `onend` 시 미처 처리되지 않은 transcript는 즉시 `finalizeRecognition()`으로 마무리한 뒤 대기 중이던 `startListening()`을 재실행. 새 세션 진입 시 남아 있는 침묵 타이머도 모두 정리 |
+| No-speech 오류 후 멈춤 | 바람 소리 등으로 인식이 시작됐지만 실제 음성이 없어 `no-speech` 오류로 종료된 뒤, 다음 세션이 자동으로 재시작되지 않아 마이크가 반응하지 않음 | `recognition.onerror`에서 `no-speech`일 때 `pendingRecognitionStartRef`를 `true`로 설정해 재시작을 큐잉하고, `onend`에서 해당 플래그를 확인해 즉시 `startListening()`을 다시 호출하도록 변경. 동시에 `recognitionActiveRef`를 false로 초기화해 상태를 확실히 복원 |
 
 ---
 
