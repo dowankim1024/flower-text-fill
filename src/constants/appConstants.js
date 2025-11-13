@@ -73,7 +73,7 @@ export const SILENCE_TIMEOUT_MS = 1000;
  * 음성 인식 활성화를 위한 최소 볼륨 임계값 (0.0 ~ 1.0)
  * @type {number}
  */
-export const VOLUME_THRESHOLD = 0.02;
+export const VOLUME_THRESHOLD = 0.08;
 
 /**
  * 볼륨 체크 간격 (밀리초)
