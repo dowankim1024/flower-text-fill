@@ -61,7 +61,7 @@ export const RENDER_IDLE_DELAY_MS = 500;
  * 새 텍스트 페이드인 애니메이션 지속 시간 (밀리초)
  * @type {number}
  */
-export const NEW_TEXT_FADE_DURATION_MS = 1500;
+export const NEW_TEXT_FADE_DURATION_MS = 1200;
 
 /**
  * 침묵 지속 시 음성 인식 종료 타임아웃 (밀리초)
@@ -73,11 +73,11 @@ export const SILENCE_TIMEOUT_MS = 1000;
  * 음성 인식 활성화를 위한 최소 볼륨 임계값 (0.0 ~ 1.0)
  * @type {number}
  */
-export const VOLUME_THRESHOLD = 0.08;
+export const VOLUME_THRESHOLD = 0.15;
 
 /**
  * 볼륨 체크 간격 (밀리초)
  * @type {number}
  */
-export const VOLUME_CHECK_INTERVAL_MS = 100;
+export const VOLUME_CHECK_INTERVAL_MS = 50;
 
