@@ -9,6 +9,11 @@ import {
   SILENCE_TIMEOUT_MS,
   VOLUME_THRESHOLD,
   VOLUME_CHECK_INTERVAL_MS,
+  RECOGNITION_RESTART_DELAY_MS,
+  RECOGNITION_MAX_RETRIES,
+  RENDER_IDLE_WATCHDOG_MS,
+  AUDIO_HEALTH_CHECK_INTERVAL_MS,
+  MIC_RECOVERY_BACKOFF_MS,
 } from "../constants/appConstants";
 import { loadFlowerResources, willTextOverflow } from "../utils/flowerUtils";
 
@@ -60,6 +65,13 @@ export default function InteractiveCanvas() {
   const analyserRef = useRef(null);
   const micStreamRef = useRef(null);
   const volumeCheckIntervalRef = useRef(null);
+  const recognitionRetryCountRef = useRef(0);
+  const recognitionRestartTimeoutRef = useRef(null);
+  const startListeningRef = useRef(null);
+  const statusWatchdogRef = useRef(null);
+  const audioHealthIntervalRef = useRef(null);
+  const audioRecoveryTimeoutRef = useRef(null);
+  const audioHealthCheckRunningRef = useRef(false);
 
   useEffect(() => {
     textRef.current = text;
@@ -85,6 +97,18 @@ export default function InteractiveCanvas() {
     }
   }, []);
 
+  const disposeAudioResources = useCallback(() => {
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((track) => track.stop());
+      micStreamRef.current = null;
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+    analyserRef.current = null;
+  }, []);
+
   useEffect(
     () => () => {
       clearResultTimer();
@@ -95,29 +119,46 @@ export default function InteractiveCanvas() {
       if (volumeCheckIntervalRef.current) {
         clearInterval(volumeCheckIntervalRef.current);
       }
-      if (micStreamRef.current) {
-        micStreamRef.current.getTracks().forEach((track) => track.stop());
+      if (statusWatchdogRef.current) {
+        clearTimeout(statusWatchdogRef.current);
       }
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
+      if (recognitionRestartTimeoutRef.current) {
+        clearTimeout(recognitionRestartTimeoutRef.current);
       }
+      if (audioHealthIntervalRef.current) {
+        clearInterval(audioHealthIntervalRef.current);
+      }
+      if (audioRecoveryTimeoutRef.current) {
+        clearTimeout(audioRecoveryTimeoutRef.current);
+      }
+      disposeAudioResources();
     },
-    [clearResultTimer],
+    [clearResultTimer, disposeAudioResources],
   );
 
   /**
    * 오디오 모니터링 설정
    * 마이크 입력의 볼륨을 측정하기 위한 Web Audio API 설정
    */
-  const setupAudioMonitoring = useCallback(async () => {
-    if (audioContextRef.current) {
-      return;
-    }
-
+  const reinitializeAudioMonitoring = useCallback(async () => {
+    disposeAudioResources();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       log("Audio stream acquired");
       micStreamRef.current = stream;
+
+      stream.getTracks().forEach((track) => {
+        track.onended = () => {
+          warn("Microphone track ended unexpectedly. Scheduling recovery.");
+          if (audioRecoveryTimeoutRef.current) {
+            return;
+          }
+          audioRecoveryTimeoutRef.current = setTimeout(() => {
+            audioRecoveryTimeoutRef.current = null;
+            reinitializeAudioMonitoring();
+          }, MIC_RECOVERY_BACKOFF_MS);
+        };
+      });
 
       const AudioContext = window.AudioContext || window.webkitAudioContext;
       const audioContext = new AudioContext();
@@ -131,9 +172,25 @@ export default function InteractiveCanvas() {
       const microphone = audioContext.createMediaStreamSource(stream);
       microphone.connect(analyser);
     } catch (error) {
-      errorLog("Failed to setup audio monitoring:", error);
+      errorLog("Failed to reinitialize audio monitoring:", error);
     }
-  }, []);
+  }, [disposeAudioResources]);
+
+  const setupAudioMonitoring = useCallback(async () => {
+    if (audioContextRef.current) {
+      if (audioContextRef.current.state === "suspended") {
+        try {
+          await audioContextRef.current.resume();
+        } catch (resumeError) {
+          warn("AudioContext resume failed, rebuilding resources.", resumeError);
+          await reinitializeAudioMonitoring();
+        }
+      }
+      return;
+    }
+
+    await reinitializeAudioMonitoring();
+  }, [reinitializeAudioMonitoring]);
 
   /**
    * 현재 마이크 입력 볼륨 측정
@@ -264,6 +321,44 @@ export default function InteractiveCanvas() {
    * 음성 인식 시작
    * Web Speech API를 사용하여 연속 음성 인식 시작
    */
+  const requestRecognitionRestart = useCallback(
+    (reason) => {
+      if (recognitionRestartTimeoutRef.current) {
+        clearTimeout(recognitionRestartTimeoutRef.current);
+      }
+
+      if (recognitionRetryCountRef.current >= RECOGNITION_MAX_RETRIES) {
+        warn(
+          "Reached maximum recognition restart attempts. Waiting for fresh signal.",
+          reason,
+        );
+        recognitionRetryCountRef.current = 0;
+        recognitionRestartTimeoutRef.current = null;
+        return;
+      }
+
+      recognitionRetryCountRef.current += 1;
+      pendingRecognitionStartRef.current = true;
+
+      recognitionRestartTimeoutRef.current = setTimeout(() => {
+        recognitionRestartTimeoutRef.current = null;
+        if (statusRef.current === "idle" && !recognitionActiveRef.current) {
+          if (startListeningRef.current) {
+            log("Restarting recognition after error", reason);
+            startListeningRef.current();
+            return;
+          }
+        }
+        warn(
+          "Recognition restart deferred because status is not idle",
+          statusRef.current,
+        );
+        pendingRecognitionStartRef.current = true;
+      }, RECOGNITION_RESTART_DELAY_MS);
+    },
+    [],
+  );
+
   const startListening = useCallback(() => {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -332,15 +427,29 @@ export default function InteractiveCanvas() {
           return;
         }
 
-        if (event.error !== "no-speech") {
-          errorLog("Speech recognition error", event.error);
-        } else {
+        recognitionActiveRef.current = false;
+
+        const fatalErrors = new Set([
+          "network",
+          "not-allowed",
+          "service-not-allowed",
+          "audio-capture",
+        ]);
+
+        if (event.error === "no-speech") {
           warn("No speech detected during recognition session");
           pendingRecognitionStartRef.current = true;
+        } else {
+          errorLog("Speech recognition error", event.error);
         }
 
-        recognitionActiveRef.current = false;
+        if (fatalErrors.has(event.error)) {
+          warn("Fatal recognition error detected. Clearing instance.");
+          recognitionRef.current = null;
+        }
+
         finalizeRecognition();
+        requestRecognitionRestart(event.error);
       };
 
       recognition.onend = () => {
@@ -370,16 +479,23 @@ export default function InteractiveCanvas() {
       recognitionRef.current.start();
       recognitionActiveRef.current = true;
       pendingRecognitionStartRef.current = false;
+      recognitionRetryCountRef.current = 0;
       log("SpeechRecognition.start() invoked");
     } catch (error) {
+      recognitionActiveRef.current = false;
       if (error.name !== "InvalidStateError") {
         errorLog("Speech recognition could not be started", error);
         setStatus("idle");
+        requestRecognitionRestart(error.name);
       } else {
         warn("SpeechRecognition.start() ignored: already running");
       }
     }
-  }, [resetSilenceTimer, finalizeRecognition]);
+  }, [resetSilenceTimer, finalizeRecognition, requestRecognitionRestart]);
+
+  useEffect(() => {
+    startListeningRef.current = startListening;
+  }, [startListening]);
 
   /**
    * 컴포넌트 마운트 시 오디오 모니터링 초기화
@@ -387,6 +503,57 @@ export default function InteractiveCanvas() {
   useEffect(() => {
     setupAudioMonitoring();
   }, [setupAudioMonitoring]);
+
+  useEffect(() => {
+    const performHealthCheck = async () => {
+      if (audioHealthCheckRunningRef.current) {
+        return;
+      }
+      audioHealthCheckRunningRef.current = true;
+      try {
+        const stream = micStreamRef.current;
+        const hasLiveTrack =
+          !!stream &&
+          stream.getAudioTracks().some((track) => track.readyState === "live");
+
+        if (!hasLiveTrack) {
+          warn("No live microphone tracks detected. Reinitializing audio.");
+          await reinitializeAudioMonitoring();
+          return;
+        }
+
+        if (
+          audioContextRef.current &&
+          audioContextRef.current.state === "suspended"
+        ) {
+          try {
+            await audioContextRef.current.resume();
+            log("AudioContext resumed after suspension");
+          } catch (resumeError) {
+            warn(
+              "Failed to resume AudioContext during health check. Rebuilding.",
+              resumeError,
+            );
+            await reinitializeAudioMonitoring();
+          }
+        }
+      } finally {
+        audioHealthCheckRunningRef.current = false;
+      }
+    };
+
+    performHealthCheck();
+    audioHealthIntervalRef.current = setInterval(() => {
+      performHealthCheck();
+    }, AUDIO_HEALTH_CHECK_INTERVAL_MS);
+
+    return () => {
+      if (audioHealthIntervalRef.current) {
+        clearInterval(audioHealthIntervalRef.current);
+        audioHealthIntervalRef.current = null;
+      }
+    };
+  }, [reinitializeAudioMonitoring]);
 
   /**
    * 볼륨 모니터링 및 임계값 초과 시 음성 인식 시작
@@ -418,6 +585,40 @@ export default function InteractiveCanvas() {
       };
     }
   }, [getCurrentVolume, startListening, status]);
+
+  useEffect(() => {
+    if (
+      status === "idle" &&
+      pendingRecognitionStartRef.current &&
+      !recognitionActiveRef.current
+    ) {
+      pendingRecognitionStartRef.current = false;
+      startListening();
+    }
+  }, [status, startListening]);
+
+  useEffect(() => {
+    if (statusWatchdogRef.current) {
+      clearTimeout(statusWatchdogRef.current);
+      statusWatchdogRef.current = null;
+    }
+
+    if (status === "idle") {
+      return;
+    }
+
+    statusWatchdogRef.current = setTimeout(() => {
+      warn("Status watchdog forcing idle transition", statusRef.current);
+      setStatus("idle");
+    }, RENDER_IDLE_WATCHDOG_MS);
+
+    return () => {
+      if (statusWatchdogRef.current) {
+        clearTimeout(statusWatchdogRef.current);
+        statusWatchdogRef.current = null;
+      }
+    };
+  }, [status]);
 
   /**
    * 캔버스 렌더링 및 애니메이션 처리

@@ -81,3 +81,33 @@ export const VOLUME_THRESHOLD = 0.15;
  */
 export const VOLUME_CHECK_INTERVAL_MS = 50;
 
+/**
+ * 음성 인식 재시작 지연 (밀리초)
+ * @type {number}
+ */
+export const RECOGNITION_RESTART_DELAY_MS = 500;
+
+/**
+ * 음성 인식 최대 연속 재시도 횟수
+ * @type {number}
+ */
+export const RECOGNITION_MAX_RETRIES = 3;
+
+/**
+ * 렌더링 상태가 특정 시간 이상 지속되면 강제 idle로 전환하는 워치독 간격 (밀리초)
+ * @type {number}
+ */
+export const RENDER_IDLE_WATCHDOG_MS = 5000;
+
+/**
+ * 오디오 컨텍스트/마이크 상태 확인 주기 (밀리초)
+ * @type {number}
+ */
+export const AUDIO_HEALTH_CHECK_INTERVAL_MS = 15000;
+
+/**
+ * 마이크 스트림 재요청 전 대기 시간 (밀리초)
+ * @type {number}
+ */
+export const MIC_RECOVERY_BACKOFF_MS = 1000;
+
